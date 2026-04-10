@@ -98,12 +98,105 @@ from numbers import Number
 # External imports:
 import numpy as np
 from numpy.linalg import norm, lstsq
-import scipy.ndimage
-import scipy.optimize
-import scipy.stats
-import scipy
-from scipy.spatial import KDTree
-from scipy.spatial.distance import pdist, cdist
+try:
+    import scipy.ndimage
+    import scipy.optimize
+    import scipy.stats
+    import scipy
+    from scipy.spatial import KDTree
+    from scipy.spatial.distance import pdist, cdist
+except ImportError:
+    # numpy-only fallbacks for environments without scipy
+    import math as _math, types as _types
+
+    # --- scipy.ndimage stub (only used in get_centroids_from_image) ---
+    class _NdimageFiltersStub:
+        @staticmethod
+        def median_filter(x, **kw): return x
+        @staticmethod
+        def uniform_filter(x, **kw): return x
+    class _NdimageStub:
+        filters = _NdimageFiltersStub
+        @staticmethod
+        def binary_opening(x, **kw): return x
+        @staticmethod
+        def label(x): return x, 0
+        @staticmethod
+        def labeled_comprehension(*a, **kw): return np.array([])
+
+    # --- scipy.stats.binom.cdf ---
+    # tetra3 calls binom.cdf(k, n, p) with p = 1 - prob_mismatch (p close to 1, q = 1-p tiny).
+    # P(X<=k; Binom(n,p)) = P(Y>=n-k; Binom(n,q))  where q=1-p
+    # ≈ 1 - Poisson_CDF(n-k-1; lambda=n*q)   (Poisson approx valid when n*q << n)
+    class _BinomDist:
+        @staticmethod
+        def cdf(k, n, p):
+            k, n = int(k), int(n)
+            lam = n * (1.0 - float(p))   # Poisson mean = n*q
+            m = n - k - 1                # compute 1 - sum_{j=0}^{m} Poisson(j|lam)
+            if m < 0:
+                return 1.0
+            term = _math.exp(-lam)
+            total = term
+            for j in range(1, m + 1):
+                term *= lam / j
+                total += term
+            return 1.0 - total
+    class _StatsStub:
+        binom = _BinomDist
+
+    scipy = _types.ModuleType('scipy')
+    scipy.ndimage = _NdimageStub
+    scipy.ndimage.filters = _NdimageFiltersStub
+    scipy.optimize = _types.ModuleType('scipy.optimize')
+    scipy.stats = _StatsStub
+
+    # --- scipy.spatial.KDTree ---
+    class KDTree:
+        def __init__(self, data):
+            self._d = np.asarray(data, dtype=float)
+        def query(self, x, k=1, **kw):
+            x = np.asarray(x, dtype=float)
+            single = x.ndim == 1
+            if single:
+                x = x[np.newaxis]
+            dists = np.sqrt(((self._d[np.newaxis] - x[:, np.newaxis]) ** 2).sum(axis=2))
+            if k == 1:
+                idx = dists.argmin(axis=1)
+                d = dists[np.arange(len(x)), idx]
+                return (float(d[0]), int(idx[0])) if single else (d, idx)
+            idx = np.argpartition(dists, k, axis=1)[:, :k]
+            order = np.argsort(dists[np.arange(len(x))[:, None], idx], axis=1)
+            idx = idx[np.arange(len(x))[:, None], order]
+            d = dists[np.arange(len(x))[:, None], idx]
+            return (d[0], idx[0]) if single else (d, idx)
+        def query_ball_point(self, x, r, **kw):
+            x = np.asarray(x, dtype=float)
+            single = x.ndim == 1
+            if single:
+                x = x[np.newaxis]
+            results = []
+            for xi in x:
+                dists = np.sqrt(((self._d - xi) ** 2).sum(axis=1))
+                results.append(list(np.where(dists <= r)[0]))
+            return results[0] if single else results
+
+    # --- scipy.spatial.distance ---
+    def pdist(X, metric='euclidean'):
+        X = np.asarray(X, dtype=float)
+        n = len(X)
+        out = np.empty(n * (n - 1) // 2)
+        k = 0
+        for i in range(n - 1):
+            d = np.sqrt(((X[i + 1:] - X[i]) ** 2).sum(axis=1))
+            out[k:k + len(d)] = d
+            k += len(d)
+        return out
+
+    def cdist(XA, XB, metric='euclidean'):
+        XA = np.asarray(XA, dtype=float)
+        XB = np.asarray(XB, dtype=float)
+        return np.sqrt(((XA[:, np.newaxis] - XB[np.newaxis]) ** 2).sum(axis=2))
 
 from PIL import Image, ImageDraw
 
